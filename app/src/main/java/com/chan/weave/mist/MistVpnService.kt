@@ -138,14 +138,9 @@ class MistVpnService : VpnService() {
             }
             // Ownership moves to Go from here on.
             val fd = pfd.detachFd()
-            // Load mist's native library explicitly. The AAR's libgojni.so
-            // is renamed to libmistgojni.so at build time (see
-            // build.gradle.kts): libv2ray.aar ships a different
-            // libgojni.so, and only one file of that name can land in
-            // the APK. go.Seq (from libv2ray) loads "gojni" for Xray;
-            // this loads mist's own native code so its JNI methods
-            // resolve. Must run before the first MobileEngine use.
-            System.loadLibrary("mistgojni")
+            // No manual loadLibrary: the gomobile runtime (go.Seq) loads
+            // "gojni" itself on first use, and Mist-only builds ship only
+            // libgojni.so (the old libmistgojni rename is gone).
             val eng = MobileEngine()
             try {
                 // Go int maps to Java long in the gomobile binding.
