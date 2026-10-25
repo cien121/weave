@@ -1,0 +1,22 @@
+name: Rename mistframework AAR v6
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  rename:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Move v6 AAR to mistframework.aar
+        run: |
+          set -e
+          ls -lh app/libs/
+          test -f app/libs/mistframework-aar-v6.aar
+          rm -f app/libs/mistframework.aar
+          git mv app/libs/mistframework-aar-v6.aar app/libs/mistframework.aar
+          ls -lh app/libs/
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -m "Replace mistframework.aar with v6 build (framework b843a98, TCP write serialization fix)"
+          git push
