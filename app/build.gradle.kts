@@ -13,8 +13,8 @@ android {
         applicationId = "com.chan.weave"
         minSdk = 26
         targetSdk = 34
-        versionCode = 34
-        versionName = "1.0.28"
+        versionCode = 35
+        versionName = "1.0.29"
 
         vectorDrawables {
             useSupportLibrary = true
@@ -75,6 +75,73 @@ android {
     // (ndk abiFilters live inside defaultConfig)
 }
 
+// ---------------------------------------------------------------------------
+// Two gomobile AARs, one name collision — handled here, not with pickFirst.
+//
+// libv2ray.aar and mistframework.aar BOTH embed:
+//  - the gomobile runtime classes go.* (go.Seq, go.Universe, go.error, ...)
+//  - jni/arm64-v8a/libgojni.so — but with DIFFERENT native code inside
+//    (36MB Xray vs 3.8MB Mist).
+//
+// Why the naive fixes are wrong:
+//  - packaging.resources.pickFirsts does NOT apply to .class files, so it
+//    cannot fix checkDebugDuplicateClasses.
+//  - packaging.jniLibs.pickFirsts WOULD fix the .so collision by dropping
+//    one file — silently deleting one backend's entire native library.
+//    That is a runtime break, not a fix.
+//
+// What this does instead (build-time only, no source changes):
+//  1. Strip go/* from mistframework.aar's classes.jar — go.* then comes
+//     only from libv2ray.aar (the gomobile bridge API is stable, and
+//     go.Seq is what loads "gojni" for Xray).
+//  2. Rename mist's libgojni.so to libmistgojni.so inside the repacked
+//     AAR, so BOTH native libraries land in the APK.
+//  3. MistVpnService loads "mistgojni" explicitly before creating the
+//     engine (see mist/MistVpnService.kt), so mist's native methods
+//     resolve even though go.Seq only loads "gojni".
+// ---------------------------------------------------------------------------
+val strippedAarDir = layout.buildDirectory.dir("strippedAars")
+
+val unpackMistAar by tasks.registering(Copy::class) {
+    from(zipTree(file("libs/mistframework.aar")))
+    into(strippedAarDir.map { it.dir("mist-unpacked") })
+}
+
+val stripMistGoClasses by tasks.registering(Copy::class) {
+    dependsOn(unpackMistAar)
+    from(zipTree(strippedAarDir.map { it.file("mist-unpacked/classes.jar") })) {
+        exclude("go/**")
+    }
+    into(strippedAarDir.map { it.dir("mist-classes") })
+}
+
+val rejarMistClasses by tasks.registering(Zip::class) {
+    dependsOn(stripMistGoClasses)
+    archiveFileName.set("classes.jar")
+    destinationDirectory.set(strippedAarDir.map { it.dir("mist-repacked") })
+    from(strippedAarDir.map { it.dir("mist-classes") })
+}
+
+val repackMistAar by tasks.registering(Zip::class) {
+    dependsOn(rejarMistClasses)
+    archiveFileName.set("mistframework.aar")
+    destinationDirectory.set(strippedAarDir)
+    from(strippedAarDir.map { it.dir("mist-unpacked") }) {
+        exclude("classes.jar")
+        exclude("jni/arm64-v8a/libgojni.so")
+    }
+    from(rejarMistClasses.map { it.archiveFile })
+    from(strippedAarDir.map { it.file("mist-unpacked/jni/arm64-v8a/libgojni.so") }) {
+        into("jni/arm64-v8a")
+        rename { "libmistgojni.so" }
+    }
+}
+
+// Make sure the repacked AAR exists before any compilation starts.
+tasks.named("preBuild") {
+    dependsOn(repackMistAar)
+}
+
 dependencies {
     // Xray-core AAR (official build from 2dust/AndroidLibXrayLite).
     // CI downloads it into app/libs/ before building; see .github/workflows/build.yml
@@ -84,7 +151,12 @@ dependencies {
     // in cien121/mist-framework; committed under app/libs/ — the
     // connector cannot push binary files, so this AAR is uploaded via
     // the GitHub web UI, not via the file-push flow).
-    implementation(files("libs/mistframework.aar"))
+    // NOTE: the dependency is the REPACKED AAR produced by the
+    // repackMistAar task above (go/* classes stripped, libgojni.so
+    // renamed to libmistgojni.so), NOT libs/mistframework.aar directly.
+    // Using the raw AAR breaks the build with duplicate go.* classes
+    // and would collide with libv2ray's libgojni.so in the APK.
+    implementation(files(repackMistAar.map { it.archiveFile }))
 
     val composeBom = platform("androidx.compose:compose-bom:2024.09.00")
     implementation(composeBom)
