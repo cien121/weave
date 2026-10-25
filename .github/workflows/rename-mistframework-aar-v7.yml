@@ -1,0 +1,25 @@
+name: Rename mistframework-aar-v7
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  rename:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rename v7 AAR to mistframework.aar
+        run: |
+          set -e
+          ls -l app/libs/
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git mv app/libs/mistframework-aar-v7.aar app/libs/mistframework.aar
+          ls -l app/libs/
+          stat -c '%s %n' app/libs/mistframework.aar
+          git status --short
+          git commit -m "Rename mistframework-aar-v7.aar to mistframework.aar (v7 build, framework c16ad834)"
+          git push
