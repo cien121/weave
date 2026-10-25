@@ -47,7 +47,6 @@ import com.chan.weave.ui.screens.AppsScreen
 import com.chan.weave.ui.screens.DnsScreen
 import com.chan.weave.ui.screens.HomeScreen
 import com.chan.weave.ui.screens.NodesScreen
-import com.chan.weave.ui.screens.RoutingScreen
 import com.chan.weave.ui.screens.SettingsScreen
 import com.chan.weave.ui.theme.AuroraCyan
 import com.chan.weave.ui.theme.InkSecondary
