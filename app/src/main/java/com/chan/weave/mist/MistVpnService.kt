@@ -12,6 +12,7 @@ import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.core.app.ServiceCompat
+import com.chan.weave.data.PerAppPrefs
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -44,6 +45,11 @@ import mobile.MobileEngine
  * effect: this app's own non-tunnel traffic (e.g. subscription
  * fetch) also bypasses the VPN. Proper fix (future work): plumb a
  * ProtectHandler callback into the Go dial path and drop this line.
+ *
+ * Per-app routing: startVpn applies PerAppPrefs (ALL/BLOCKLIST/ALLOWLIST)
+ * to the Builder; see applyPerAppRouting. Our own app is excluded from
+ * the tunnel in every mode. A setting change takes effect on next
+ * connect; the live tunnel is not re-routed.
  *
  * Stats: the gomobile API has no StatsListener (gomobile cannot bind
  * interfaces), so this service polls getUploadBytes/getDownloadBytes
@@ -119,7 +125,7 @@ class MistVpnService : VpnService() {
         }
         MistVpnController.setState(MistVpnController.State.CONNECTING)
         try {
-            val pfd: ParcelFileDescriptor? = Builder()
+            val builder = Builder()
                 .setSession("Mist")
                 .addAddress("10.0.0.2", 32)
                 .addAddress("fd00::2", 128)
@@ -128,8 +134,8 @@ class MistVpnService : VpnService() {
                 .addDnsServer("8.8.8.8")
                 .addDnsServer("2001:4860:4860::8888")
                 .setMtu(1400)
-                .addDisallowedApplication(packageName)
-                .establish()
+            applyPerAppRouting(builder)
+            val pfd: ParcelFileDescriptor? = builder.establish()
             if (pfd == null) {
                 Log.e(TAG, "establish() returned null (permission revoked?)")
                 MistVpnController.setError("vpn permission revoked")
@@ -187,6 +193,80 @@ class MistVpnService : VpnService() {
             Log.e(TAG, "startVpn failed", e)
             MistVpnController.setError(e.message ?: "start failed")
             stopSelf()
+        }
+    }
+
+    /**
+     * Applies the user's per-app routing preference (PerAppPrefs, SharedPreferences
+     * file "per_app") to the Builder. Takes effect on next connect; changing the
+     * setting while connected does not re-route the live tunnel.
+     *
+     * Android allows only ONE of the two lists per Builder: calling both
+     * addAllowedApplication and addDisallowedApplication throws
+     * UnsupportedOperationException, so each mode below uses exactly one kind.
+     *
+     * Weave itself never enters the tunnel in any mode: its own UDP socket to
+     * the Mist server would be routed back into the TUN and loop (see class
+     * KDoc). In BLOCKLIST/ALL this is a disallow entry; in ALLOWLIST it is
+     * achieved by never adding our own package to the allow list (only listed
+     * apps enter the TUN, everything else bypasses it).
+     *
+     * Edge: an ALLOWLIST whose effective list is empty (user picked nothing,
+     * or only our own package, or every entry failed to resolve) would mean
+     * "no restriction" on Android, which would route our own socket into the
+     * TUN. Fall back to disallowing only ourselves (global tunnel) instead.
+     * Unresolvable package names (app uninstalled) are skipped with a log line
+     * so one stale entry cannot kill the whole tunnel start.
+     */
+    private fun applyPerAppRouting(builder: VpnService.Builder) {
+        val mode = PerAppPrefs.getMode(this)
+        val packages = PerAppPrefs.getPackages(this)
+        when (mode) {
+            PerAppPrefs.Mode.BLOCKLIST -> {
+                addDisallowedApp(builder, packageName)
+                for (pkg in packages) {
+                    if (pkg != packageName) addDisallowedApp(builder, pkg)
+                }
+                Log.i(TAG, "per-app BLOCKLIST: ${packages.size} entries")
+            }
+            PerAppPrefs.Mode.ALLOWLIST -> {
+                var added = 0
+                for (pkg in packages) {
+                    if (pkg == packageName) continue // never route ourselves in
+                    if (addAllowedApp(builder, pkg)) added++
+                }
+                if (added == 0) {
+                    // No effective allow list: Android would treat this as
+                    // unrestricted and loop our own socket. Exclude only
+                    // ourselves instead (no mixing: no allowed call succeeded).
+                    addDisallowedApp(builder, packageName)
+                    Log.i(TAG, "per-app ALLOWLIST empty, fell back to global tunnel")
+                } else {
+                    Log.i(TAG, "per-app ALLOWLIST: $added apps")
+                }
+            }
+            PerAppPrefs.Mode.ALL -> {
+                addDisallowedApp(builder, packageName)
+            }
+        }
+    }
+
+    /** Returns true if the app was added; false if it is not installed. */
+    private fun addAllowedApp(builder: VpnService.Builder, pkg: String): Boolean {
+        return try {
+            builder.addAllowedApplication(pkg)
+            true
+        } catch (e: Exception) {
+            Log.w(TAG, "per-app allowlist: skipped unresolvable $pkg", e)
+            false
+        }
+    }
+
+    private fun addDisallowedApp(builder: VpnService.Builder, pkg: String) {
+        try {
+            builder.addDisallowedApplication(pkg)
+        } catch (e: Exception) {
+            Log.w(TAG, "per-app blocklist: skipped unresolvable $pkg", e)
         }
     }
 
