@@ -12,7 +12,9 @@ import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Log
 import androidx.core.app.ServiceCompat
+import com.chan.weave.data.DnsPrefs
 import com.chan.weave.data.PerAppPrefs
+import com.chan.weave.data.TunnelPrefs
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -50,6 +52,17 @@ import mobile.MobileEngine
  * to the Builder; see applyPerAppRouting. Our own app is excluded from
  * the tunnel in every mode. A setting change takes effect on next
  * connect; the live tunnel is not re-routed.
+ *
+ * Split / adblock: startVpn applies TunnelPrefs (both default ON) to
+ * the engine via setSplitEnabled / setAdblockEnabled / setLocalDNS —
+ * once before start (so the config is in place when the tunnel comes
+ * up) and once after a successful start (so a setter that only
+ * affects a running session still takes effect). The local DNS handed
+ * to setLocalDNS is DnsPrefs.directDns (default 223.5.5.5), the DNS
+ * for bypassed/direct traffic. Settings toggles additionally apply
+ * split/adblock to the live engine (MistVpnController.engine) with
+ * no reconnect; a DNS-server change has no live path and applies on
+ * next connect.
  *
  * Stats: the gomobile API has no StatsListener (gomobile cannot bind
  * interfaces), so this service polls getUploadBytes/getDownloadBytes
@@ -148,6 +161,9 @@ class MistVpnService : VpnService() {
             // "gojni" itself on first use, and Mist-only builds ship only
             // libgojni.so.
             val eng = MobileEngine()
+            // Split / adblock config before start, so it is in place
+            // when the tunnel comes up (see applyTunnelPrefs).
+            applyTunnelPrefs(eng)
             try {
                 // Go int maps to Java long in the gomobile binding.
                 eng.start(fd.toLong(), nodeUrl)
@@ -160,6 +176,9 @@ class MistVpnService : VpnService() {
             }
             engine = eng
             MistVpnController.engine = eng
+            // Re-apply after start: covers setters that only affect a
+            // running session. No-op if they already took effect.
+            applyTunnelPrefs(eng)
             currentNode = nodeUrl
             goForeground(nodeUrl)
             MistVpnController.setState(MistVpnController.State.CONNECTED)
@@ -193,6 +212,40 @@ class MistVpnService : VpnService() {
             Log.e(TAG, "startVpn failed", e)
             MistVpnController.setError(e.message ?: "start failed")
             stopSelf()
+        }
+    }
+
+    /**
+     * Applies split / adblock / local-DNS preferences to an engine
+     * instance. Called both before and after eng.start() in startVpn
+     * (see there). Each setter is guarded: a setter failure must not
+     * abort the tunnel start, it is logged and the tunnel proceeds
+     * with the engine's own defaults for that knob.
+     *
+     * NOTE: setSplitEnabled / setAdblockEnabled / setLocalDNS are the
+     * new Mobile API from the framework batch (gomobile lowerCamel
+     * mapping). They do not exist in the current AAR (framework
+     * 9e5272a5); this code compiles only once the new AAR lands —
+     * do not build against the old AAR.
+     */
+    private fun applyTunnelPrefs(eng: MobileEngine) {
+        try {
+            eng.setSplitEnabled(TunnelPrefs.isSplitEnabled(this))
+        } catch (e: Exception) {
+            Log.w(TAG, "setSplitEnabled failed", e)
+        }
+        try {
+            eng.setAdblockEnabled(TunnelPrefs.isAdblockEnabled(this))
+        } catch (e: Exception) {
+            Log.w(TAG, "setAdblockEnabled failed", e)
+        }
+        try {
+            // Extension properties declared in DnsPrefs need its scope.
+            val localDns = DnsPrefs.run { this@MistVpnService.directDns }
+                .trim().ifEmpty { DnsPrefs.DEFAULT_DIRECT_DNS }
+            eng.setLocalDNS(localDns)
+        } catch (e: Exception) {
+            Log.w(TAG, "setLocalDNS failed", e)
         }
     }
 

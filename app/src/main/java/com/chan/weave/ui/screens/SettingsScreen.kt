@@ -1,5 +1,7 @@
 package com.chan.weave.ui.screens
 
+import android.util.Log
+
 import com.chan.weave.BuildConfig
 
 import androidx.compose.foundation.background
@@ -37,6 +39,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.chan.weave.data.TunnelPrefs
 import com.chan.weave.mist.MistVpnController
 import com.chan.weave.ui.components.AuroraBackground
 import com.chan.weave.ui.theme.AuroraCyan
@@ -53,11 +56,15 @@ import com.chan.weave.ui.theme.NightSurface
  * rules (Xray routing), chain proxy (Xray outbounds). What remains
  * is TUN-level or app-level: IPv6, auto-connect, per-app, DNS.
  */
+private const val TAG = "Settings"
+
 @Composable
 fun SettingsScreen(onNavigate: (String) -> Unit = {}) {
     val context = androidx.compose.ui.platform.LocalContext.current
     var ipv6 by remember { mutableStateOf(com.chan.weave.data.DnsPrefs.run { context.ipv6Enabled }) }
     var autoConnect by remember { mutableStateOf(false) }
+    var splitEnabled by remember { mutableStateOf(TunnelPrefs.isSplitEnabled(context)) }
+    var adblockEnabled by remember { mutableStateOf(TunnelPrefs.isAdblockEnabled(context)) }
 
     Box(modifier = Modifier.fillMaxSize()) {
         AuroraBackground()
@@ -96,6 +103,26 @@ fun SettingsScreen(onNavigate: (String) -> Unit = {}) {
             }
 
             SettingsGroup(title = "分流") {
+                SettingsToggle(
+                    title = "国内直连",
+                    subtitle = "国内流量直连、国外流量走隧道",
+                    checked = splitEnabled,
+                    onCheckedChange = {
+                        splitEnabled = it
+                        TunnelPrefs.setSplitEnabled(context, it)
+                        applyLiveSplit(it)
+                    }
+                )
+                SettingsToggle(
+                    title = "广告屏蔽",
+                    subtitle = "在 DNS 层拦截广告域名",
+                    checked = adblockEnabled,
+                    onCheckedChange = {
+                        adblockEnabled = it
+                        TunnelPrefs.setAdblockEnabled(context, it)
+                        applyLiveAdblock(it)
+                    }
+                )
                 SettingsRow(
                     title = "分应用",
                     value = "按应用控制代理",
@@ -125,6 +152,31 @@ fun SettingsScreen(onNavigate: (String) -> Unit = {}) {
                 SettingsRow(title = "开源许可", value = "GPL-3.0", onClick = {})
             }
         }
+    }
+}
+
+/**
+ * Live-apply a toggle to the running engine, if any. The preference
+ * is already persisted by the caller, so a null engine simply means
+ * "takes effect on next connect" — no reconnect is forced here.
+ * Each setter is a plain flag set on the gomobile engine; a failure
+ * is logged, never thrown into the Compose UI.
+ */
+private fun applyLiveSplit(enabled: Boolean) {
+    val engine = MistVpnController.engine ?: return
+    try {
+        engine.setSplitEnabled(enabled)
+    } catch (e: Exception) {
+        Log.w(TAG, "live setSplitEnabled failed", e)
+    }
+}
+
+private fun applyLiveAdblock(enabled: Boolean) {
+    val engine = MistVpnController.engine ?: return
+    try {
+        engine.setAdblockEnabled(enabled)
+    } catch (e: Exception) {
+        Log.w(TAG, "live setAdblockEnabled failed", e)
     }
 }
 
