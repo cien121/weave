@@ -1,12 +1,16 @@
 package com.chan.weave
 
+import android.Manifest
 import android.app.Activity
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.core.content.ContextCompat
 import com.chan.weave.ui.MainViewModel
 import com.chan.weave.ui.navigation.CianCoreNavGraph
 import com.chan.weave.ui.theme.CianCoreTheme
@@ -24,9 +28,22 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private val notificationPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { _ -> /* Foreground-service notifications still show without it. */ }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        // Android 13+: ask for POST_NOTIFICATIONS once so the VPN
+        // foreground notification is always visible.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(
+                this, Manifest.permission.POST_NOTIFICATIONS
+            ) != PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
         // Handle node shortcut: connect directly to the specified node.
         handleShortcutIntent()
         setContent {

@@ -14,6 +14,7 @@ import com.chan.weave.data.NodeDao
 import com.chan.weave.data.NodeLinkParser
 import com.chan.weave.data.NodeShortcutManager
 import com.chan.weave.data.SubscriptionManager
+import com.chan.weave.mist.MistVpnController
 import com.chan.weave.service.CianCoreVpnService
 import com.chan.weave.service.CianCoreVpnService.ConnectionState
 import kotlinx.coroutines.Dispatchers
@@ -22,6 +23,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -30,17 +32,40 @@ import kotlinx.coroutines.withContext
 /**
  * Home/Nodes shared view model.
  *
- * - Connection state comes straight from [CianCoreVpnService.state],
- *   so the orb always reflects the real tunnel state.
+ * - Connection state merges [CianCoreVpnService.state] (Xray path)
+ *   with the Mist framework path: when a mist:// node is active, the
+ *   Mist state wins, so the orb always reflects the real tunnel state.
  * - Nodes come from Room; the selected node drives connect().
  */
 class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val dao: NodeDao = CianCoreApp.instance.database.nodeDao()
 
-    val connectionState: StateFlow<ConnectionState> = CianCoreVpnService.state
-    val connectionError: StateFlow<String?> = CianCoreVpnService.errorMessage
-    val activeNodeId: StateFlow<Long?> = CianCoreVpnService.activeNodeId
+    /** Mist-backend mirror: IDLE unless a mist:// tunnel is active. */
+    private val _mistState = MutableStateFlow(ConnectionState.IDLE)
+    private val _mistError = MutableStateFlow<String?>(null)
+    private val _mistActiveNodeId = MutableStateFlow<Long?>(null)
+
+    /** True while the active tunnel runs on the Mist framework. */
+    private val _mistActive = MutableStateFlow(false)
+
+    val connectionState: StateFlow<ConnectionState> = combine(
+        CianCoreVpnService.state, _mistState, _mistActive
+    ) { xray, mist, mistActive ->
+        if (mistActive) mist else xray
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, ConnectionState.IDLE)
+
+    val connectionError: StateFlow<String?> = combine(
+        CianCoreVpnService.errorMessage, _mistError, _mistActive
+    ) { xray, mist, mistActive ->
+        if (mistActive) mist else xray
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    val activeNodeId: StateFlow<Long?> = combine(
+        CianCoreVpnService.activeNodeId, _mistActiveNodeId, _mistActive
+    ) { xray, mist, mistActive ->
+        if (mistActive) mist else xray
+    }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
 
     val nodes: StateFlow<List<Node>> = dao.observeAll()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -152,10 +177,75 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 delay(2000)
             }
         }
+        // Mirror the Mist framework state into the merged flows, and
+        // compute traffic speed from its polled byte counters.
+        // (MistVpnController has no callback API; the service polls
+        // the gomobile engine once a second.)
+        MistVpnController.onStateChanged = { s ->
+            _mistState.value = when (s) {
+                MistVpnController.State.DISCONNECTED -> ConnectionState.IDLE
+                MistVpnController.State.CONNECTING -> ConnectionState.CONNECTING
+                MistVpnController.State.CONNECTED -> ConnectionState.CONNECTED
+                MistVpnController.State.ERROR -> ConnectionState.ERROR
+            }
+            _mistError.value = MistVpnController.errorMessage
+            if (s == MistVpnController.State.DISCONNECTED ||
+                s == MistVpnController.State.ERROR
+            ) {
+                _mistActive.value = false
+                _mistActiveNodeId.value = null
+            }
+        }
+        viewModelScope.launch {
+            var lastUp = 0L
+            var lastDown = 0L
+            var lastAt = 0L
+            while (isActive) {
+                if (_mistActive.value) {
+                    try {
+                        val up = MistVpnController.uploadBytes
+                        val down = MistVpnController.downloadBytes
+                        val now = System.currentTimeMillis()
+                        if (lastAt > 0) {
+                            val dt = (now - lastAt).coerceAtLeast(1) / 1000.0
+                            _trafficSpeed.value = TrafficSpeed(
+                                downBps = ((down - lastDown).coerceAtLeast(0) / dt).toLong(),
+                                upBps = ((up - lastUp).coerceAtLeast(0) / dt).toLong()
+                            )
+                        }
+                        lastUp = up
+                        lastDown = down
+                        lastAt = now
+                    } catch (_: Throwable) {
+                    }
+                } else {
+                    lastAt = 0L
+                }
+                delay(1000)
+            }
+        }
+    }
+
+    /** A node is a Mist-framework node when its link uses mist://. */
+    private fun isMistNode(node: Node?): Boolean =
+        node?.rawLink?.trim()?.startsWith("mist://") == true
+
+    /** Pending mist:// link waiting on the VPN permission dialog. */
+    private var pendingMistLink: String? = null
+    private var pendingMistNodeId: Long? = null
+
+    /** Start a mist:// tunnel. Caller must hold VPN permission. */
+    private fun startMist(ctx: Application, node: Node) {
+        _mistActiveNodeId.value = node.id
+        _mistActive.value = true
+        _mistState.value = ConnectionState.CONNECTING
+        MistVpnController.start(ctx, node.rawLink.trim())
     }
 
     /**
      * Orb tap. When disconnected: connect the selected node.
+     * mist:// nodes go through the independent Mist framework;
+     * everything else keeps the existing Xray path.
      * @param requestVpnPermission invoked with the system VPN permission
      * intent when the user hasn't granted it yet.
      */
@@ -168,6 +258,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     return
                 }
                 val ctx = getApplication<Application>()
+                val node = nodes.value.firstOrNull { it.id == nodeId }
+                if (isMistNode(node)) {
+                    val permissionIntent = MistVpnController.prepareIntent(ctx)
+                    if (permissionIntent != null) {
+                        pendingMistLink = node.rawLink.trim()
+                        pendingMistNodeId = node.id
+                        requestVpnPermission(permissionIntent)
+                    } else {
+                        startMist(ctx, node)
+                    }
+                    return
+                }
                 val permissionIntent = CianCoreVpnService.prepareIntent(ctx)
                 if (permissionIntent != null) {
                     requestVpnPermission(permissionIntent)
@@ -177,18 +279,42 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
             ConnectionState.CONNECTING -> { /* tap does nothing mid-flight */ }
             ConnectionState.CONNECTED -> {
-                CianCoreVpnService.startDisconnect(getApplication())
+                if (_mistActive.value) {
+                    _mistActive.value = false
+                    _mistActiveNodeId.value = null
+                    MistVpnController.stop(getApplication())
+                } else {
+                    CianCoreVpnService.startDisconnect(getApplication())
+                }
             }
         }
     }
 
     /** Called after the user grants VPN permission from the system dialog. */
     fun onVpnPermissionGranted() {
+        val pendingLink = pendingMistLink
+        val pendingId = pendingMistNodeId
+        if (pendingLink != null && pendingId != null) {
+            pendingMistLink = null
+            pendingMistNodeId = null
+            val ctx = getApplication<Application>()
+            val node = nodes.value.firstOrNull { it.id == pendingId }
+            if (node != null && isMistNode(node)) {
+                startMist(ctx, node)
+                return
+            }
+        }
         val nodeId = _selectedId.value ?: return
         if (connectionState.value == ConnectionState.IDLE ||
             connectionState.value == ConnectionState.ERROR
         ) {
-            CianCoreVpnService.startConnect(getApplication(), nodeId)
+            val node = nodes.value.firstOrNull { it.id == nodeId }
+            if (isMistNode(node)) {
+                val ctx = getApplication<Application>()
+                startMist(ctx, node!!)
+            } else {
+                CianCoreVpnService.startConnect(getApplication(), nodeId)
+            }
         }
     }
 
@@ -219,6 +345,17 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val ctx = getApplication<Application>()
             when (connectionState.value) {
                 ConnectionState.IDLE, ConnectionState.ERROR -> {
+                    if (isMistNode(node)) {
+                        val permissionIntent = MistVpnController.prepareIntent(ctx)
+                        if (permissionIntent != null) {
+                            pendingMistLink = node.rawLink.trim()
+                            pendingMistNodeId = node.id
+                            requestVpnPermission(permissionIntent)
+                        } else {
+                            startMist(ctx, node)
+                        }
+                        return@launch
+                    }
                     val permissionIntent = CianCoreVpnService.prepareIntent(ctx)
                     if (permissionIntent != null) {
                         // Need permission: store pending node and request
@@ -229,8 +366,29 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 }
                 ConnectionState.CONNECTED -> {
-                    // Already connected: switch immediately to this node.
-                    CianCoreVpnService.startSwitch(ctx, node.id)
+                    if (isMistNode(node)) {
+                        // Cross-backend switch: tear down the current
+                        // tunnel first, then start the Mist tunnel.
+                        if (_mistActive.value) {
+                            _mistActive.value = false
+                            _mistActiveNodeId.value = null
+                            MistVpnController.stop(ctx)
+                        } else {
+                            CianCoreVpnService.startDisconnect(ctx)
+                        }
+                        delay(500)
+                        startMist(ctx, node)
+                    } else {
+                        if (_mistActive.value) {
+                            // Mist -> Xray switch: stop Mist first.
+                            _mistActive.value = false
+                            _mistActiveNodeId.value = null
+                            MistVpnController.stop(ctx)
+                            delay(500)
+                        }
+                        // Already connected: switch immediately to this node.
+                        CianCoreVpnService.startSwitch(ctx, node.id)
+                    }
                 }
                 else -> { /* connecting, ignore */ }
             }
@@ -242,10 +400,35 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Called after VPN permission granted for a shortcut-initiated connection. */
     fun onShortcutVpnPermissionGranted() {
+        val pendingLink = pendingMistLink
+        val pendingId = pendingMistNodeId
+        if (pendingLink != null && pendingId != null) {
+            pendingMistLink = null
+            pendingMistNodeId = null
+            val ctx = getApplication<Application>()
+            viewModelScope.launch {
+                val node = withContext(Dispatchers.IO) { dao.getById(pendingId) }
+                if (node != null && isMistNode(node)) {
+                    startMist(ctx, node)
+                    return@launch
+                }
+                if (node != null) {
+                    CianCoreVpnService.startConnect(ctx, node.id)
+                }
+            }
+            return
+        }
         val nodeId = _pendingShortcutNodeId.value ?: return
         _pendingShortcutNodeId.value = null
         val ctx = getApplication<Application>()
-        CianCoreVpnService.startConnect(ctx, nodeId)
+        viewModelScope.launch {
+            val node = withContext(Dispatchers.IO) { dao.getById(nodeId) }
+            if (node != null && isMistNode(node)) {
+                startMist(ctx, node)
+            } else {
+                CianCoreVpnService.startConnect(ctx, nodeId)
+            }
+        }
     }
 
     /** Parse a share link and store it. Returns the error message, or null on success. */

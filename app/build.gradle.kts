@@ -13,8 +13,8 @@ android {
         applicationId = "com.chan.weave"
         minSdk = 26
         targetSdk = 34
-        versionCode = 33
-        versionName = "1.0.27"
+        versionCode = 34
+        versionName = "1.0.28"
 
         vectorDrawables {
             useSupportLibrary = true
@@ -79,6 +79,12 @@ dependencies {
     // Xray-core AAR (official build from 2dust/AndroidLibXrayLite).
     // CI downloads it into app/libs/ before building; see .github/workflows/build.yml
     implementation(files("libs/libv2ray.aar"))
+
+    // Independent Mist framework AAR (gomobile bind of the mobile package
+    // in cien121/mist-framework; committed under app/libs/ — the
+    // connector cannot push binary files, so this AAR is uploaded via
+    // the GitHub web UI, not via the file-push flow).
+    implementation(files("libs/mistframework.aar"))
 
     val composeBom = platform("androidx.compose:compose-bom:2024.09.00")
     implementation(composeBom)
