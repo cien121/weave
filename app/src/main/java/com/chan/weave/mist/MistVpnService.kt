@@ -140,7 +140,7 @@ class MistVpnService : VpnService() {
             val fd = pfd.detachFd()
             // No manual loadLibrary: the gomobile runtime (go.Seq) loads
             // "gojni" itself on first use, and Mist-only builds ship only
-            // libgojni.so (the old libmistgojni rename is gone).
+            // libgojni.so.
             val eng = MobileEngine()
             try {
                 // Go int maps to Java long in the gomobile binding.
