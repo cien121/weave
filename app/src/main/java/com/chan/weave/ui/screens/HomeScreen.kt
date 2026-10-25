@@ -25,7 +25,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.chan.weave.service.CianCoreVpnService.ConnectionState
+import com.chan.weave.ui.ConnectionState
 import com.chan.weave.ui.MainViewModel
 import com.chan.weave.ui.components.AuroraBackground
 import com.chan.weave.ui.components.ConnectionOrb
@@ -45,7 +45,7 @@ import kotlinx.coroutines.delay
  * Aurora sky, living connection orb in the center, HUD stats floating
  * beneath, and the node deck at the bottom. One tap on the orb is the
  * entire connection UX. State flows from [MainViewModel], which mirrors
- * the real [CianCoreVpnService] tunnel state.
+ * the real [MistVpnController] tunnel state.
  */
 @Composable
 fun HomeScreen(
@@ -196,3 +196,4 @@ private fun StatusLine(
         modifier = Modifier.padding(horizontal = 32.dp)
     )
 }
+

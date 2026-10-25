@@ -7,7 +7,7 @@ import androidx.room.RoomDatabase
 import androidx.room.TypeConverters
 import com.chan.weave.core.CoreType
 
-@Database(entities = [Node::class], version = 4, exportSchema = false)
+@Database(entities = [Node::class], version = 5, exportSchema = false) // v5: CoreType shrank to MIST-only; destructive migration wipes old rows
 @TypeConverters(CoreTypeConverters::class)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun nodeDao(): NodeDao
@@ -30,3 +30,4 @@ abstract class AppDatabase : RoomDatabase() {
         }
     }
 }
+

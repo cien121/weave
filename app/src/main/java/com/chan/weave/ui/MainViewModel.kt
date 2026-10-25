@@ -5,7 +5,7 @@ import android.content.Intent
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.chan.weave.CianCoreApp
-import com.chan.weave.core.CoreRegistry
+import com.chan.weave.core.CoreType
 import com.chan.weave.core.LatencyTester
 import com.chan.weave.data.DnsPrefs.concurrentTests
 import com.chan.weave.data.IpChecker
@@ -15,57 +15,39 @@ import com.chan.weave.data.NodeLinkParser
 import com.chan.weave.data.NodeShortcutManager
 import com.chan.weave.data.SubscriptionManager
 import com.chan.weave.mist.MistVpnController
-import com.chan.weave.service.CianCoreVpnService
-import com.chan.weave.service.CianCoreVpnService.ConnectionState
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
+/** Tunnel connection state, shared by HomeScreen and the tile. */
+enum class ConnectionState { IDLE, CONNECTING, CONNECTED, ERROR }
+
 /**
- * Home/Nodes shared view model.
- *
- * - Connection state merges [CianCoreVpnService.state] (Xray path)
- *   with the Mist framework path: when a mist:// node is active, the
- *   Mist state wins, so the orb always reflects the real tunnel state.
- * - Nodes come from Room; the selected node drives connect().
+ * Home/Nodes shared view model. Weave is Mist-only since 1.0.30:
+ * the only tunnel backend is the independent Mist framework
+ * ([MistVpnController]). Xray was fully removed (use SwiftNG for Xray).
+ * Nodes come from Room; the selected node drives connect().
+ * Only mist:// nodes can connect; anything else gets a notice.
  */
 class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val dao: NodeDao = CianCoreApp.instance.database.nodeDao()
 
-    /** Mist-backend mirror: IDLE unless a mist:// tunnel is active. */
+    /** Mist tunnel state, mirrored from [MistVpnController]. */
     private val _mistState = MutableStateFlow(ConnectionState.IDLE)
     private val _mistError = MutableStateFlow<String?>(null)
     private val _mistActiveNodeId = MutableStateFlow<Long?>(null)
 
-    /** True while the active tunnel runs on the Mist framework. */
-    private val _mistActive = MutableStateFlow(false)
-
-    val connectionState: StateFlow<ConnectionState> = combine(
-        CianCoreVpnService.state, _mistState, _mistActive
-    ) { xray, mist, mistActive ->
-        if (mistActive) mist else xray
-    }.stateIn(viewModelScope, SharingStarted.Eagerly, ConnectionState.IDLE)
-
-    val connectionError: StateFlow<String?> = combine(
-        CianCoreVpnService.errorMessage, _mistError, _mistActive
-    ) { xray, mist, mistActive ->
-        if (mistActive) mist else xray
-    }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
-
-    val activeNodeId: StateFlow<Long?> = combine(
-        CianCoreVpnService.activeNodeId, _mistActiveNodeId, _mistActive
-    ) { xray, mist, mistActive ->
-        if (mistActive) mist else xray
-    }.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+    val connectionState: StateFlow<ConnectionState> = _mistState.asStateFlow()
+    val connectionError: StateFlow<String?> = _mistError.asStateFlow()
+    val activeNodeId: StateFlow<Long?> = _mistActiveNodeId.asStateFlow()
 
     val nodes: StateFlow<List<Node>> = dao.observeAll()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
@@ -79,27 +61,10 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val _egressIp = MutableStateFlow<IpChecker.IpInfo?>(null)
     val egressIp: StateFlow<IpChecker.IpInfo?> = _egressIp.asStateFlow()
 
-    /** Refresh egress IP. Protocol-aware: hysteria2/socks prefer v4, others v6. */
+    /** Refresh egress IP. Mist production egress runs over VPS IPv6. */
     private fun refreshEgress() {
         viewModelScope.launch {
-            val nodeId = activeNodeId.value
-            val preferV6 = withContext(Dispatchers.IO) {
-                val node = nodeId?.let { runCatching { dao.getById(it) }.getOrNull() }
-                when (node?.protocol?.lowercase()) {
-                    "hysteria2", "socks" -> false
-                    "proxychain" -> {
-                        // For chain, use the LAST member (exit)'s protocol
-                        val ids = getChainMemberIds(node)
-                        val last = ids.lastOrNull()?.let { runCatching { dao.getById(it) }.getOrNull() }
-                        when (last?.protocol?.lowercase()) {
-                            "hysteria2", "socks" -> false
-                            else -> true
-                        }
-                    }
-                    else -> true
-                }
-            }
-            _egressIp.value = IpChecker.check(getApplication(), preferV6)
+            _egressIp.value = IpChecker.check(getApplication(), true)
         }
     }
 
@@ -130,7 +95,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             }
         }
         // Refresh egress IP whenever the tunnel connects.
-        // Protocol-aware: hysteria2/socks prefer v4, others prefer v6.
         viewModelScope.launch {
             connectionState.collect { state ->
                 if (state == ConnectionState.CONNECTED) {
@@ -140,45 +104,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 }
             }
         }
-        // Poll traffic stats while connected (2s cadence).
-        viewModelScope.launch {
-            var lastTx = 0L
-            var lastRx = 0L
-            var lastAt = 0L
-            while (isActive) {
-                if (connectionState.value == ConnectionState.CONNECTED) {
-                    try {
-                        val stats = withContext(Dispatchers.IO) {
-                            CoreRegistry.getOrNull(
-                                com.chan.weave.core.CoreType.XRAY
-                            )?.queryTrafficStats()
-                        }
-                        val now = System.currentTimeMillis()
-                        if (stats != null && lastAt > 0) {
-                            val dt = (now - lastAt).coerceAtLeast(1) / 1000.0
-                            val down = ((stats.rxBytes - lastRx).coerceAtLeast(0) / dt).toLong()
-                            val up = ((stats.txBytes - lastTx).coerceAtLeast(0) / dt).toLong()
-                            _trafficSpeed.value = TrafficSpeed(down, up)
-                        }
-                        if (stats != null) {
-                            lastTx = stats.txBytes
-                            lastRx = stats.rxBytes
-                            lastAt = now
-                        }
-                    } catch (_: Throwable) {
-                        // Keep last known speed.
-                    }
-                } else {
-                    lastAt = 0L
-                    if (_trafficSpeed.value != TrafficSpeed()) {
-                        _trafficSpeed.value = TrafficSpeed()
-                    }
-                }
-                delay(2000)
-            }
-        }
-        // Mirror the Mist framework state into the merged flows, and
-        // compute traffic speed from its polled byte counters.
+        // Mirror the Mist framework state, and compute traffic speed
+        // from its polled byte counters.
         // (MistVpnController has no callback API; the service polls
         // the gomobile engine once a second.)
         MistVpnController.onStateChanged = { s ->
@@ -192,7 +119,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             if (s == MistVpnController.State.DISCONNECTED ||
                 s == MistVpnController.State.ERROR
             ) {
-                _mistActive.value = false
                 _mistActiveNodeId.value = null
             }
         }
@@ -201,7 +127,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             var lastDown = 0L
             var lastAt = 0L
             while (isActive) {
-                if (_mistActive.value) {
+                if (connectionState.value == ConnectionState.CONNECTED) {
                     try {
                         val up = MistVpnController.uploadBytes
                         val down = MistVpnController.downloadBytes
@@ -220,13 +146,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     }
                 } else {
                     lastAt = 0L
+                    if (_trafficSpeed.value != TrafficSpeed()) {
+                        _trafficSpeed.value = TrafficSpeed()
+                    }
                 }
                 delay(1000)
             }
         }
     }
 
-    /** A node is a Mist-framework node when its link uses mist://. */
+    /** A node is connectable when its link uses mist://. */
     private fun isMistNode(node: Node?): Boolean =
         node?.rawLink?.trim()?.startsWith("mist://") == true
 
@@ -237,15 +166,13 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** Start a mist:// tunnel. Caller must hold VPN permission. */
     private fun startMist(ctx: Application, node: Node) {
         _mistActiveNodeId.value = node.id
-        _mistActive.value = true
         _mistState.value = ConnectionState.CONNECTING
         MistVpnController.start(ctx, node.rawLink.trim())
     }
 
     /**
      * Orb tap. When disconnected: connect the selected node.
-     * mist:// nodes go through the independent Mist framework;
-     * everything else keeps the existing Xray path.
+     * Only mist:// nodes work; anything else gets a notice.
      * @param requestVpnPermission invoked with the system VPN permission
      * intent when the user hasn't granted it yet.
      */
@@ -259,33 +186,23 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                 }
                 val ctx = getApplication<Application>()
                 val node = nodes.value.firstOrNull { it.id == nodeId }
-                if (isMistNode(node)) {
-                    val permissionIntent = MistVpnController.prepareIntent(ctx)
-                    if (permissionIntent != null) {
-                        pendingMistLink = node.rawLink.trim()
-                        pendingMistNodeId = node.id
-                        requestVpnPermission(permissionIntent)
-                    } else {
-                        startMist(ctx, node)
-                    }
+                if (!isMistNode(node)) {
+                    _notice.value = "只支持 mist:// 节点"
                     return
                 }
-                val permissionIntent = CianCoreVpnService.prepareIntent(ctx)
+                val permissionIntent = MistVpnController.prepareIntent(ctx)
                 if (permissionIntent != null) {
+                    pendingMistLink = node!!.rawLink.trim()
+                    pendingMistNodeId = node.id
                     requestVpnPermission(permissionIntent)
                 } else {
-                    CianCoreVpnService.startConnect(ctx, nodeId)
+                    startMist(ctx, node!!)
                 }
             }
             ConnectionState.CONNECTING -> { /* tap does nothing mid-flight */ }
             ConnectionState.CONNECTED -> {
-                if (_mistActive.value) {
-                    _mistActive.value = false
-                    _mistActiveNodeId.value = null
-                    MistVpnController.stop(getApplication())
-                } else {
-                    CianCoreVpnService.startDisconnect(getApplication())
-                }
+                _mistActiveNodeId.value = null
+                MistVpnController.stop(getApplication())
             }
         }
     }
@@ -309,11 +226,8 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             connectionState.value == ConnectionState.ERROR
         ) {
             val node = nodes.value.firstOrNull { it.id == nodeId }
-            if (isMistNode(node)) {
-                val ctx = getApplication<Application>()
-                startMist(ctx, node!!)
-            } else {
-                CianCoreVpnService.startConnect(getApplication(), nodeId)
+            if (node != null && isMistNode(node)) {
+                startMist(getApplication(), node)
             }
         }
     }
@@ -345,50 +259,28 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val ctx = getApplication<Application>()
             when (connectionState.value) {
                 ConnectionState.IDLE, ConnectionState.ERROR -> {
-                    if (isMistNode(node)) {
-                        val permissionIntent = MistVpnController.prepareIntent(ctx)
-                        if (permissionIntent != null) {
-                            pendingMistLink = node.rawLink.trim()
-                            pendingMistNodeId = node.id
-                            requestVpnPermission(permissionIntent)
-                        } else {
-                            startMist(ctx, node)
-                        }
+                    if (!isMistNode(node)) {
+                        _notice.value = "只支持 mist:// 节点"
                         return@launch
                     }
-                    val permissionIntent = CianCoreVpnService.prepareIntent(ctx)
+                    val permissionIntent = MistVpnController.prepareIntent(ctx)
                     if (permissionIntent != null) {
-                        // Need permission: store pending node and request
-                        _pendingShortcutNodeId.value = node.id
+                        pendingMistLink = node.rawLink.trim()
+                        pendingMistNodeId = node.id
                         requestVpnPermission(permissionIntent)
                     } else {
-                        CianCoreVpnService.startConnect(ctx, node.id)
+                        startMist(ctx, node)
                     }
                 }
                 ConnectionState.CONNECTED -> {
-                    if (isMistNode(node)) {
-                        // Cross-backend switch: tear down the current
-                        // tunnel first, then start the Mist tunnel.
-                        if (_mistActive.value) {
-                            _mistActive.value = false
-                            _mistActiveNodeId.value = null
-                            MistVpnController.stop(ctx)
-                        } else {
-                            CianCoreVpnService.startDisconnect(ctx)
-                        }
-                        delay(500)
-                        startMist(ctx, node)
-                    } else {
-                        if (_mistActive.value) {
-                            // Mist -> Xray switch: stop Mist first.
-                            _mistActive.value = false
-                            _mistActiveNodeId.value = null
-                            MistVpnController.stop(ctx)
-                            delay(500)
-                        }
-                        // Already connected: switch immediately to this node.
-                        CianCoreVpnService.startSwitch(ctx, node.id)
+                    // Switch to this node: tear down first, then start.
+                    MistVpnController.stop(ctx)
+                    delay(500)
+                    if (!isMistNode(node)) {
+                        _notice.value = "只支持 mist:// 节点"
+                        return@launch
                     }
+                    startMist(ctx, node)
                 }
                 else -> { /* connecting, ignore */ }
             }
@@ -412,9 +304,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                     startMist(ctx, node)
                     return@launch
                 }
-                if (node != null) {
-                    CianCoreVpnService.startConnect(ctx, node.id)
-                }
             }
             return
         }
@@ -425,8 +314,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
             val node = withContext(Dispatchers.IO) { dao.getById(nodeId) }
             if (node != null && isMistNode(node)) {
                 startMist(ctx, node)
-            } else {
-                CianCoreVpnService.startConnect(ctx, nodeId)
             }
         }
     }
@@ -478,14 +365,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    /** Real-connection test (full Xray handshake) for one node. */
+    /** Connection test for one node (Mist-only: TCP ping). */
     fun testRealConnection(node: Node) {
         if (_testingIds.value.contains(node.id)) return
         _testingIds.value = _testingIds.value + node.id
         viewModelScope.launch {
             try {
                 val ms = LatencyTester.realTest(getApplication(), node)
-                // Fall back to TCP ping if the real test fails outright.
+                // Fall back to TCP ping if the test fails outright.
                 val final = if (ms < 0) {
                     try {
                         LatencyTester.tcpPing(node.host, node.port)
@@ -512,50 +399,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     /** Create a blank node for manual editing. Returns the inserted node. */
     fun createManualNode(protocol: String, onDone: (Node) -> Unit) {
         viewModelScope.launch {
-            // Single-core (Xray only); sing-box removed.
-            val coreType = com.chan.weave.core.CoreType.XRAY
             val node = Node(
                 name = "新节点",
                 rawLink = "",
                 protocol = protocol,
-                network = "tcp",
-                coreType = coreType
+                network = "mist",
+                coreType = CoreType.MIST
             )
             val id = withContext(Dispatchers.IO) { dao.insert(node) }
             onDone(node.copy(id = id))
         }
-    }
-
-    /**
-     * Create a PROXYCHAIN virtual node. The chain members' IDs are stored in
-     * rawLink as "proxychain:<id1>,<id2>,...". The node appears in the panel
-     * like a normal node and can be connected, tested, shared, deleted.
-     */
-    fun createProxyChainNode(members: List<Node>) {
-        if (members.isEmpty()) return
-        viewModelScope.launch {
-            val ids = members.map { it.id }.joinToString(",")
-            val chainDesc = members.joinToString("→") { it.name }
-            val node = Node(
-                name = "链式",
-                rawLink = "proxychain:$ids",
-                protocol = "proxychain",
-                network = "tcp",
-                coreType = com.chan.weave.core.CoreType.XRAY,
-                // Store display hint in sni field (reused)
-                sni = chainDesc
-            )
-            withContext(Dispatchers.IO) { dao.insert(node) }
-            _notice.value = "已创建链式节点：$chainDesc"
-        }
-    }
-
-    /** Parse chain member IDs from a proxychain node's rawLink. */
-    fun getChainMemberIds(node: Node): List<Long> {
-        if (node.protocol != "proxychain") return emptyList()
-        val raw = node.rawLink.removePrefix("proxychain:").trim()
-        if (raw.isEmpty()) return emptyList()
-        return raw.split(",").mapNotNull { it.toLongOrNull() }
     }
 
     /** Test all nodes with the configured concurrency. */

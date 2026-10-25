@@ -104,7 +104,7 @@ data class Node(
     /** TUIC UDP relay mode */
     val udpRelayMode: String = "native",
     /** Which core engine runs this node */
-    val coreType: CoreType = CoreType.XRAY,
+    val coreType: CoreType = CoreType.MIST,
     /** Last measured latency in ms, -1 = untested */
     val latencyMs: Long = -1,
     /** Whether this node is currently selected */
@@ -112,3 +112,4 @@ data class Node(
     /** Creation timestamp */
     val createdAt: Long = System.currentTimeMillis()
 )
+

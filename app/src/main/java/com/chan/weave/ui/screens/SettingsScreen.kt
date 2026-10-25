@@ -5,7 +5,6 @@ import com.chan.weave.BuildConfig
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -26,7 +25,6 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -39,56 +37,27 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import com.chan.weave.mist.MistVpnController
 import com.chan.weave.ui.components.AuroraBackground
 import com.chan.weave.ui.theme.AuroraCyan
 import com.chan.weave.ui.theme.InkPrimary
 import com.chan.weave.ui.theme.InkSecondary
 import com.chan.weave.ui.theme.NightOutline
 import com.chan.weave.ui.theme.NightSurface
-import com.chan.weave.core.CoreRegistry
-import com.chan.weave.core.CoreType
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import com.chan.weave.data.ChainPrefs.chainNodeIds
-import kotlinx.coroutines.withContext
 
 /**
  * Settings — quiet control room.
  *
- * Grouped glass sections, minimal chrome. Skeleton toggles only;
- * real preferences land with the feature work.
+ * Mist-only since 1.0.30: Xray-specific items are gone —
+ * Mux / Fragment (Xray stream settings), Geo resources and routing
+ * rules (Xray routing), chain proxy (Xray outbounds). What remains
+ * is TUN-level or app-level: IPv6, auto-connect, per-app, DNS.
  */
 @Composable
 fun SettingsScreen(onNavigate: (String) -> Unit = {}) {
     val context = androidx.compose.ui.platform.LocalContext.current
     var ipv6 by remember { mutableStateOf(com.chan.weave.data.DnsPrefs.run { context.ipv6Enabled }) }
     var autoConnect by remember { mutableStateOf(false) }
-    var geoStatus by remember { mutableStateOf<String?>(null) }
-    var geoBusy by remember { mutableStateOf(false) }
-    var geoProgress by remember { mutableStateOf<String?>(null) }
-    // Stream tuning (Mux / Fragment / Local DNS)
-    var muxEnabled by remember { mutableStateOf(com.chan.weave.data.StreamPrefs.isMuxEnabled(context)) }
-    var fragmentEnabled by remember { mutableStateOf(com.chan.weave.data.StreamPrefs.isFragmentEnabled(context)) }
-    // Chain proxy
-    var showChainPicker by remember { mutableStateOf(false) }
-    var chainNodes by remember { mutableStateOf<List<com.chan.weave.data.Node>>(emptyList()) }
-    var chainNodeName by remember { mutableStateOf<String?>(null) }
-    // Load chain state
-    androidx.compose.runtime.LaunchedEffect(Unit) {
-        val nodes = withContext(Dispatchers.IO) {
-            com.chan.weave.CianCoreApp.instance.database.nodeDao().getAll()
-        }
-        chainNodes = nodes
-        val ids = context.chainNodeIds
-        chainNodeName = if (ids.isEmpty()) {
-            null
-        } else {
-            ids.mapNotNull { id -> nodes.firstOrNull { it.id == id }?.name }
-                .joinToString(" → ").ifEmpty { null }
-        }
-    }
 
     Box(modifier = Modifier.fillMaxSize()) {
         AuroraBackground()
@@ -126,27 +95,6 @@ fun SettingsScreen(onNavigate: (String) -> Unit = {}) {
                 )
             }
 
-            SettingsGroup(title = "传输优化") {
-                SettingsToggle(
-                    title = "Mux 多路复用",
-                    subtitle = "单连接复用多路流，降低延迟（默认并发 8）",
-                    checked = muxEnabled,
-                    onCheckedChange = {
-                        muxEnabled = it
-                        com.chan.weave.data.StreamPrefs.setMuxEnabled(context, it)
-                    }
-                )
-                SettingsToggle(
-                    title = "分片 (Fragment)",
-                    subtitle = "切分 TLS 握手，规避 SNI 探测",
-                    checked = fragmentEnabled,
-                    onCheckedChange = {
-                        fragmentEnabled = it
-                        com.chan.weave.data.StreamPrefs.setFragmentEnabled(context, it)
-                    }
-                )
-            }
-
             SettingsGroup(title = "分流") {
                 SettingsRow(
                     title = "分应用",
@@ -154,47 +102,16 @@ fun SettingsScreen(onNavigate: (String) -> Unit = {}) {
                     onClick = { onNavigate("apps") }
                 )
                 SettingsRow(
-                    title = "路由规则",
-                    value = "${com.chan.weave.data.RoutePrefs.getRules(context).count { it.enabled }} 条启用中",
-                    onClick = { onNavigate("routing") }
-                )
-                SettingsRow(
                     title = "DNS 与网络",
                     value = "DNS / 测速 / VPN 参数",
                     onClick = { onNavigate("dns") }
-                )
-                SettingsRow(
-                    title = "Geo 资源",
-                    value = if (geoBusy) (geoProgress ?: "更新中…") else (geoStatus ?: "点击更新"),
-                    onClick = {
-                        if (geoBusy) return@SettingsRow
-                        geoBusy = true
-                        geoStatus = null
-                        geoProgress = "准备下载…"
-                        CoroutineScope(Dispatchers.Main).launch {
-                            val err = withContext(Dispatchers.IO) {
-                                com.chan.weave.data.GeoManager.update(context) { label, done, total ->
-                                    CoroutineScope(Dispatchers.Main).launch {
-                                        geoProgress = if (total > 0) {
-                                            "$label ${(done * 100 / total).toInt()}%"
-                                        } else {
-                                            "$label ${done / 1024}KB"
-                                        }
-                                    }
-                                }
-                            }
-                            geoBusy = false
-                            geoProgress = null
-                            geoStatus = err ?: "已更新到最新"
-                        }
-                    }
                 )
             }
 
             SettingsGroup(title = "核心") {
                 SettingsRow(
-                    title = "Xray-core 版本",
-                    value = "v26.10.10",
+                    title = "Mist 核心版本",
+                    value = MistVpnController.MIST_CORE_VERSION,
                     onClick = {}
                 )
             }
@@ -208,23 +125,6 @@ fun SettingsScreen(onNavigate: (String) -> Unit = {}) {
                 SettingsRow(title = "开源许可", value = "GPL-3.0", onClick = {})
             }
         }
-    }
-
-    // Chain proxy picker dialog
-    if (showChainPicker) {
-        ChainPickerDialog(
-            nodes = chainNodes,
-            onDismiss = { showChainPicker = false },
-            onPick = { selected ->
-                context.chainNodeIds = selected.map { it.id }
-                chainNodeName = if (selected.isEmpty()) {
-                    null
-                } else {
-                    selected.joinToString(" → ") { it.name }
-                }
-                showChainPicker = false
-            }
-        )
     }
 }
 
@@ -304,107 +204,4 @@ private fun SettingsRow(
         Spacer(Modifier.width(4.dp))
         Icon(icon, contentDescription = null, tint = InkSecondary)
     }
-}
-
-/** Chain proxy node picker: select multiple nodes in order (multi-hop). */
-@Composable
-private fun ChainPickerDialog(
-    nodes: List<com.chan.weave.data.Node>,
-    onDismiss: () -> Unit,
-    onPick: (List<com.chan.weave.data.Node>) -> Unit
-) {
-    val context = androidx.compose.ui.platform.LocalContext.current
-    var selectedIds by remember { mutableStateOf<MutableList<Long>>(context.chainNodeIds.toMutableList()) }
-    androidx.compose.material3.AlertDialog(
-        onDismissRequest = onDismiss,
-        title = { Text("⛓️ 链式代理", color = InkPrimary) },
-        text = {
-            Column(
-                modifier = Modifier.verticalScroll(rememberScrollState()),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                Text(
-                    text = "按顺序选择多个节点，流量将依次经过它们（多跳）。已选 ${selectedIds.size} 个",
-                    fontSize = 12.sp,
-                    color = InkSecondary
-                )
-                Spacer(Modifier.height(4.dp))
-                // Show current chain order
-                if (selectedIds.isNotEmpty()) {
-                    Text(
-                        text = "链顺序：" + selectedIds.mapIndexed { idx, id ->
-                            "${idx + 1}.${nodes.firstOrNull { it.id == id }?.name ?: "?"}"
-                        }.joinToString(" → "),
-                        fontSize = 11.sp,
-                        color = AuroraCyan
-                    )
-                    Spacer(Modifier.height(4.dp))
-                }
-                nodes.forEach { node ->
-                    val selectedIndex = selectedIds.indexOf(node.id)
-                    val selected = selectedIndex >= 0
-                    Box(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(RoundedCornerShape(10.dp))
-                            .border(
-                                1.dp,
-                                if (selected) AuroraCyan else NightOutline,
-                                RoundedCornerShape(10.dp)
-                            )
-                            .clickable {
-                                if (selected) {
-                                    selectedIds.remove(node.id)
-                                } else {
-                                    selectedIds.add(node.id)
-                                }
-                            }
-                            .padding(horizontal = 14.dp, vertical = 10.dp)
-                    ) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            if (selected) {
-                                Text(
-                                    text = "${selectedIndex + 1}",
-                                    fontSize = 14.sp,
-                                    color = AuroraCyan,
-                                    fontWeight = FontWeight.Bold,
-                                    modifier = Modifier.padding(end = 8.dp)
-                                )
-                            }
-                            Column(modifier = Modifier.weight(1f)) {
-                                Text(
-                                    text = node.name,
-                                    fontSize = 14.sp,
-                                    color = if (selected) AuroraCyan else InkPrimary,
-                                    fontWeight = FontWeight.Medium
-                                )
-                                Text(
-                                    text = "${node.protocol.uppercase()} · ${node.host}:${node.port}",
-                                    fontSize = 11.sp,
-                                    color = InkSecondary
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-        },
-        confirmButton = {
-            androidx.compose.material3.TextButton(
-                onClick = {
-                    val selected = selectedIds.mapNotNull { id ->
-                        nodes.firstOrNull { it.id == id }
-                    }
-                    onPick(selected)
-                }
-            ) {
-                Text("确定", color = AuroraCyan)
-            }
-        },
-        dismissButton = {
-            androidx.compose.material3.TextButton(onClick = onDismiss) {
-                Text("取消", color = InkSecondary)
-            }
-        }
-    )
 }

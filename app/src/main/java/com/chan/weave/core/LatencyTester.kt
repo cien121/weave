@@ -1,9 +1,6 @@
 package com.chan.weave.core
 
 import android.content.Context
-import com.chan.weave.core.xray.XrayConfigBuilder
-import com.chan.weave.core.xray.XrayCore
-import com.chan.weave.data.DnsPrefs.testUrl
 import com.chan.weave.data.Node
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -15,12 +12,13 @@ import java.net.InetSocketAddress
 import java.net.Socket
 
 /**
- * Latency testing: TCP ping + real-connection (Xray handshake) test.
+ * Latency testing (Mist-only).
  *
- * - tcpPing: raw TCP connect timing to host:port.
- * - realTest: full Xray outbound dial + HTTP round trip to the
- *   user-configured test URL.
- * Returns milliseconds, or -1 on failure.
+ * Weave no longer ships Xray, so there is no "real-connection"
+ * (Xray handshake) test. TCP connect timing is the meaningful
+ * measurement for a Mist node: it proves the server address is
+ * reachable. The Mist tunnel itself is verified by real traffic
+ * after connecting, not by a pre-flight handshake.
  */
 object LatencyTester {
 
@@ -39,32 +37,11 @@ object LatencyTester {
         }
 
     /**
-     * Real connection test: builds the node's Xray config and measures
-     * a full handshake + HTTP round trip through the proxy.
-     * Returns milliseconds, or -1 on failure.
+     * Real-connection test. Mist-only: same as TCP ping.
+     * Kept under the old name so callers don't change.
      */
     suspend fun realTest(context: Context, node: Node): Long =
-        withContext(Dispatchers.IO) {
-            try {
-                if (node.coreType != CoreType.XRAY) return@withContext -1L
-                val config = if (node.protocol == "proxychain") {
-                    // Resolve chain members from the DB and build a chain test config.
-                    val ids = node.rawLink.removePrefix("proxychain:").trim()
-                        .split(",").mapNotNull { it.toLongOrNull() }
-                    val dao = com.chan.weave.CianCoreApp.instance.database.nodeDao()
-                    val members = ids.mapNotNull { runCatching { dao.getById(it) }.getOrNull() }
-                        .filter { it.protocol != "proxychain" }
-                    if (members.isEmpty()) return@withContext -1L
-                    XrayConfigBuilder.buildChainTest(members)
-                } else {
-                    XrayConfigBuilder.buildOutboundTest(node)
-                }
-                val url = context.testUrl.ifBlank { XrayCore.DELAY_TEST_URL }
-                XrayCore(context.applicationContext).measureLatency(config, url)
-            } catch (_: Throwable) {
-                -1L
-            }
-        }
+        tcpPing(node.host, node.port)
 
     /**
      * Test many nodes with bounded concurrency.
@@ -80,9 +57,8 @@ object LatencyTester {
         nodes.map { node ->
             async {
                 semaphore.withPermit {
-                    val ms = realTest(context, node)
-                    val final = if (ms < 0) tcpPing(node.host, node.port) else ms
-                    onResult(node, final)
+                    val ms = tcpPing(node.host, node.port)
+                    onResult(node, ms)
                 }
             }
         }.awaitAll()

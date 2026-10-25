@@ -1,17 +1,15 @@
 package com.chan.weave.core
 
 /**
- * Supported proxy core engines.
- *
- * Add a new entry here + a [ProxyCore] implementation + one line in
- * [CoreRegistry] and the new core is live. No other changes needed.
+ * Proxy core engine. Weave is Mist-only since 1.0.30:
+ * Xray was fully removed (use SwiftNG for Xray).
+ * This enum is kept because [com.chan.weave.data.Node] stores it;
+ * it has a single value now.
  */
 enum class CoreType(val displayName: String) {
-    XRAY("Xray"),
-    SING_BOX("sing-box");
+    MIST("Mist");
 
     companion object {
-        fun fromName(name: String): CoreType =
-            entries.firstOrNull { it.name == name } ?: XRAY
+        fun fromName(name: String): CoreType = MIST
     }
 }

@@ -6,18 +6,20 @@ import android.os.Build
 import android.service.quicksettings.Tile
 import android.service.quicksettings.TileService
 import com.chan.weave.CianCoreApp
+import com.chan.weave.MainActivity
 import com.chan.weave.R
+import com.chan.weave.mist.MistVpnController
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
 /**
- * Quick Settings tile: tap to toggle the VPN tunnel.
+ * Quick Settings tile: tap to toggle the Mist tunnel.
  * Shows active state when connected.
+ * Mist-only since 1.0.30 (previously read the Xray service state).
  */
 class CianCoreTileService : TileService() {
 
@@ -26,8 +28,7 @@ class CianCoreTileService : TileService() {
     override fun onStartListening() {
         super.onStartListening()
         scope.launch {
-            val state = CianCoreVpnService.state.first()
-            val connected = state == CianCoreVpnService.ConnectionState.CONNECTED
+            val connected = MistVpnController.state == MistVpnController.State.CONNECTED
             // Show the selected node name on the tile, like v2rayNG does.
             val nodeName = try {
                 val dao = CianCoreApp.instance.database.nodeDao()
@@ -42,19 +43,36 @@ class CianCoreTileService : TileService() {
     override fun onClick() {
         super.onClick()
         scope.launch {
-            val state = CianCoreVpnService.state.first()
-            val connected = state == CianCoreVpnService.ConnectionState.CONNECTED
-            val intent = Intent(this@CianCoreTileService, CianCoreVpnService::class.java).apply {
-                action = if (connected) CianCoreVpnService.ACTION_DISCONNECT
-                else CianCoreVpnService.ACTION_CONNECT
+            val connected = MistVpnController.state == MistVpnController.State.CONNECTED
+            if (connected) {
+                MistVpnController.stop(this@CianCoreTileService)
+                updateTile(false)
+                return@launch
             }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(intent)
+            // Not connected: connect the selected Mist node, or fall
+            // back to opening the app when there is none.
+            val node = try {
+                val dao = CianCoreApp.instance.database.nodeDao()
+                withContext(Dispatchers.IO) { dao.getSelected() }
+            } catch (_: Throwable) { null }
+            if (node != null && node.rawLink.trim().startsWith("mist://")) {
+                if (MistVpnController.isPrepared(this@CianCoreTileService)) {
+                    MistVpnController.start(this@CianCoreTileService, node.rawLink.trim())
+                    updateTile(true, node.name)
+                } else {
+                    // VPN permission not granted: open the app so the
+                    // system permission dialog can be shown.
+                    val intent = Intent(this@CianCoreTileService, MainActivity::class.java).apply {
+                        flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                    }
+                    startActivityAndCollapse(intent)
+                }
             } else {
-                startService(intent)
+                val intent = Intent(this@CianCoreTileService, MainActivity::class.java).apply {
+                    flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                }
+                startActivityAndCollapse(intent)
             }
-            // Optimistically flip the tile; the service will correct it.
-            updateTile(!connected)
         }
         // For Android 13+, request the system to keep the tile updated.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {

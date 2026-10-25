@@ -36,20 +36,6 @@
         </activity>
 
         <service
-            android:name=".service.CianCoreVpnService"
-            android:exported="false"
-            android:foregroundServiceType="specialUse"
-            android:permission="android.permission.BIND_VPN_SERVICE"
-            tools:ignore="VpnServicePolicy">
-            <intent-filter>
-                <action android:name="android.net.VpnService" />
-            </intent-filter>
-            <property
-                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
-                android:value="vpn" />
-        </service>
-
-        <service
             android:name=".mist.MistVpnService"
             android:exported="false"
             android:foregroundServiceType="dataSync"
@@ -73,3 +59,4 @@
 
     </application>
 </manifest>
+

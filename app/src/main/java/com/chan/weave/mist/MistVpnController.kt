@@ -28,6 +28,13 @@ import android.os.Build
  */
 object MistVpnController {
 
+    /**
+     * Independent Mist framework version, shown in Settings → 核心.
+     * Tracks cien121/mist-framework releases; bump when the AAR is
+     * rebuilt from a new framework commit.
+     */
+    const val MIST_CORE_VERSION = "1.0.0"
+
     enum class State { DISCONNECTED, CONNECTING, CONNECTED, ERROR }
 
     @Volatile var state: State = State.DISCONNECTED
@@ -104,3 +111,4 @@ object MistVpnController {
         context.startService(intent)
     }
 }
+
