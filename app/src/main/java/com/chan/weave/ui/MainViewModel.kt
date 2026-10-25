@@ -7,7 +7,9 @@ import androidx.lifecycle.viewModelScope
 import com.chan.weave.CianCoreApp
 import com.chan.weave.core.CoreType
 import com.chan.weave.core.LatencyTester
+import com.chan.weave.data.DnsPrefs.DEFAULT_IP_INFO_URL
 import com.chan.weave.data.DnsPrefs.concurrentTests
+import com.chan.weave.data.DnsPrefs.ipInfoUrl
 import com.chan.weave.data.IpChecker
 import com.chan.weave.data.Node
 import com.chan.weave.data.NodeDao
@@ -61,10 +63,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val _egressIp = MutableStateFlow<IpChecker.IpInfo?>(null)
     val egressIp: StateFlow<IpChecker.IpInfo?> = _egressIp.asStateFlow()
 
-    /** Refresh egress IP. Mist production egress runs over VPS IPv6. */
+    /**
+     * Refresh egress IP through the Mist engine (never direct HTTP:
+     * the app's own traffic bypasses the VPN, so direct would return
+     * the real IP). Mist production egress runs over VPS IPv6.
+     */
     private fun refreshEgress() {
         viewModelScope.launch {
-            _egressIp.value = IpChecker.check(getApplication(), true)
+            val ctx = getApplication<Application>()
+            val url = ctx.ipInfoUrl.trim().ifEmpty { DEFAULT_IP_INFO_URL }
+            _egressIp.value = IpChecker.checkViaEngine(MistVpnController.engine, url)
         }
     }
 
@@ -80,6 +88,18 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     data class TrafficSpeed(val downBps: Long = 0, val upBps: Long = 0)
     private val _trafficSpeed = MutableStateFlow(TrafficSpeed())
     val trafficSpeed: StateFlow<TrafficSpeed> = _trafficSpeed.asStateFlow()
+
+    /** Engine diagnostics, polled while connected (0 = healthy). */
+    data class EngineDiagnostics(
+        val tunWriteErrors: Long = 0,
+        val acksSent: Long = 0,
+        val ackSendErrors: Long = 0,
+        val datagramsSent: Long = 0,
+        val datagramsSendErrors: Long = 0,
+        val datagramsReceived: Long = 0
+    )
+    private val _diagnostics = MutableStateFlow(EngineDiagnostics())
+    val diagnostics: StateFlow<EngineDiagnostics> = _diagnostics.asStateFlow()
 
     init {
         viewModelScope.launch {
@@ -142,12 +162,23 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
                         lastUp = up
                         lastDown = down
                         lastAt = now
+                        _diagnostics.value = EngineDiagnostics(
+                            tunWriteErrors = MistVpnController.tunWriteErrors,
+                            acksSent = MistVpnController.acksSent,
+                            ackSendErrors = MistVpnController.ackSendErrors,
+                            datagramsSent = MistVpnController.datagramsSent,
+                            datagramsSendErrors = MistVpnController.datagramsSendErrors,
+                            datagramsReceived = MistVpnController.datagramsReceived
+                        )
                     } catch (_: Throwable) {
                     }
                 } else {
                     lastAt = 0L
                     if (_trafficSpeed.value != TrafficSpeed()) {
                         _trafficSpeed.value = TrafficSpeed()
+                    }
+                    if (_diagnostics.value != EngineDiagnostics()) {
+                        _diagnostics.value = EngineDiagnostics()
                     }
                 }
                 delay(1000)

@@ -59,6 +59,7 @@ fun HomeScreen(
     val notice by vm.notice.collectAsState()
     val egressIp by vm.egressIp.collectAsState()
     val trafficSpeed by vm.trafficSpeed.collectAsState()
+    val diagnostics by vm.diagnostics.collectAsState()
 
     val selectedNode = nodeList.firstOrNull { it.id == currentSelectedId }
 
@@ -135,6 +136,19 @@ fun HomeScreen(
                 upBps = trafficSpeed.upBps,
                 modifier = Modifier.padding(horizontal = 20.dp)
             )
+            // Engine diagnostics (one small line, only while connected):
+            // TUN write failures and datagram counters pinpoint whether
+            // Mist data actually reaches apps or dies on delivery.
+            if (state == ConnectionState.CONNECTED) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = "诊断 TUN写失败 ${diagnostics.tunWriteErrors} · ACK ${diagnostics.acksSent}（失败 ${diagnostics.ackSendErrors}）· 数据报 收 ${diagnostics.datagramsReceived} / 发 ${diagnostics.datagramsSent}（失败 ${diagnostics.datagramsSendErrors}）",
+                    fontSize = 11.sp,
+                    color = InkSecondary,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(horizontal = 24.dp)
+                )
+            }
             Spacer(Modifier.height(28.dp))
 
             // Node deck

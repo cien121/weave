@@ -153,6 +153,7 @@ class MistVpnService : VpnService() {
                 return
             }
             engine = eng
+            MistVpnController.engine = eng
             currentNode = nodeUrl
             goForeground(nodeUrl)
             MistVpnController.setState(MistVpnController.State.CONNECTED)
@@ -166,6 +167,15 @@ class MistVpnService : VpnService() {
                             MistVpnController.updateStats(
                                 e.uploadBytes,
                                 e.downloadBytes
+                            )
+                            // Java getters map to Kotlin properties.
+                            MistVpnController.updateDiagnostics(
+                                e.tunWriteErrors,
+                                e.acksSent,
+                                e.ackSendErrors,
+                                e.datagramsSent,
+                                e.datagramsSendErrors,
+                                e.datagramsReceived
                             )
                         }
                     } catch (_: Throwable) {
@@ -187,6 +197,7 @@ class MistVpnService : VpnService() {
             Log.w(TAG, "engine stop", e)
         }
         engine = null
+        MistVpnController.engine = null
         currentNode = null
         // The TUN fd was detached to Go and closed by engine.stop().
     }

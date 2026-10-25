@@ -4,10 +4,12 @@ import android.content.Context
 import android.content.Intent
 import android.net.VpnService
 import android.os.Build
+import mobile.MobileEngine
 
 /**
  * UI-facing API for the Mist VPN service. Weave only talks to this
- * object, never to the service or to gomobile classes directly.
+ * object, never to the service directly (the live engine is exposed
+ * here so the egress check can run inside the tunnel).
  *
  * Typical flow from a connect button (must run in the foreground —
  * Android 12+ forbids background foreground-service starts):
@@ -49,6 +51,32 @@ object MistVpnController {
     @Volatile var downloadBytes: Long = 0
         private set
 
+    /**
+     * Live gomobile engine while connected, null otherwise.
+     * Set by [MistVpnService]; MainViewModel uses it for the
+     * engine-internal egress check (never a direct HTTP call).
+     */
+    @Volatile var engine: MobileEngine? = null
+
+    /** Engine diagnostics, polled by the service once a second. */
+    @Volatile var tunWriteErrors: Long = 0
+        private set
+
+    @Volatile var acksSent: Long = 0
+        private set
+
+    @Volatile var ackSendErrors: Long = 0
+        private set
+
+    @Volatile var datagramsSent: Long = 0
+        private set
+
+    @Volatile var datagramsSendErrors: Long = 0
+        private set
+
+    @Volatile var datagramsReceived: Long = 0
+        private set
+
     /** Invoked on state change; may be called off the main thread. */
     var onStateChanged: ((State) -> Unit)? = null
 
@@ -66,6 +94,22 @@ object MistVpnController {
     fun updateStats(up: Long, down: Long) {
         uploadBytes = up
         downloadBytes = down
+    }
+
+    fun updateDiagnostics(
+        tunWriteErrors: Long,
+        acksSent: Long,
+        ackSendErrors: Long,
+        datagramsSent: Long,
+        datagramsSendErrors: Long,
+        datagramsReceived: Long
+    ) {
+        this.tunWriteErrors = tunWriteErrors
+        this.acksSent = acksSent
+        this.ackSendErrors = ackSendErrors
+        this.datagramsSent = datagramsSent
+        this.datagramsSendErrors = datagramsSendErrors
+        this.datagramsReceived = datagramsReceived
     }
 
     /** True when VPN permission is already granted. */
