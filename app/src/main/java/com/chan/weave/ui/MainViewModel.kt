@@ -354,33 +354,14 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
     private val _testingIds = MutableStateFlow<Set<Long>>(emptySet())
     val testingIds: StateFlow<Set<Long>> = _testingIds.asStateFlow()
 
-    /** TCP ping test for one node; stores result in DB. */
-    fun testTcpPing(node: Node) {
-        if (_testingIds.value.contains(node.id)) return
-        _testingIds.value = _testingIds.value + node.id
-        viewModelScope.launch {
-            val ms = LatencyTester.tcpPing(node.host, node.port)
-            withContext(Dispatchers.IO) { dao.updateLatency(node.id, ms) }
-            _testingIds.value = _testingIds.value - node.id
-        }
-    }
-
-    /** Connection test for one node (Mist-only: TCP ping). */
+    /** Connection test for one node (Mist-only: handshake round-trip). */
     fun testRealConnection(node: Node) {
         if (_testingIds.value.contains(node.id)) return
         _testingIds.value = _testingIds.value + node.id
         viewModelScope.launch {
             try {
                 val ms = LatencyTester.realTest(getApplication(), node)
-                // Fall back to TCP ping if the test fails outright.
-                val final = if (ms < 0) {
-                    try {
-                        LatencyTester.tcpPing(node.host, node.port)
-                    } catch (_: Throwable) {
-                        -1L
-                    }
-                } else ms
-                withContext(Dispatchers.IO) { dao.updateLatency(node.id, final) }
+                withContext(Dispatchers.IO) { dao.updateLatency(node.id, ms) }
             } catch (_: Throwable) {
                 // Never crash the app from a latency test
             } finally {

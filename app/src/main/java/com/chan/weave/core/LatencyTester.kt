@@ -8,40 +8,37 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
-import java.net.InetSocketAddress
-import java.net.Socket
+import mobile.Mobile
 
 /**
  * Latency testing (Mist-only).
  *
- * Weave no longer ships Xray, so there is no "real-connection"
- * (Xray handshake) test. TCP connect timing is the meaningful
- * measurement for a Mist node: it proves the server address is
- * reachable. The Mist tunnel itself is verified by real traffic
- * after connecting, not by a pre-flight handshake.
+ * Mist servers listen on UDP only, so a TCP connect to the Mist port
+ * always fails and can never measure latency. The real measurement is
+ * a Mist handshake round-trip: [mistPing] runs one QUIC Initial +
+ * AUTH exchange through the Go framework (mobile.Mobile.ping) and
+ * returns its time. No TCP fallback: a failed handshake is -1.
  */
 object LatencyTester {
 
-    /** TCP connect latency in ms, -1 on failure/timeout. */
-    suspend fun tcpPing(host: String, port: Int, timeoutMs: Int = 5000): Long =
+    /** Mist handshake latency in ms, -1 on failure/timeout. */
+    suspend fun mistPing(nodeUrl: String, timeoutSec: Int = 5): Long =
         withContext(Dispatchers.IO) {
             try {
-                val start = System.currentTimeMillis()
-                Socket().use { socket ->
-                    socket.connect(InetSocketAddress(host, port), timeoutMs)
-                }
-                System.currentTimeMillis() - start
+                // Go int maps to Java long in the gomobile binding;
+                // a Go error surfaces as a Java exception.
+                Mobile.ping(nodeUrl, timeoutSec.toLong())
             } catch (_: Throwable) {
                 -1L
             }
         }
 
     /**
-     * Real-connection test. Mist-only: same as TCP ping.
+     * Real-connection test. Mist-only: one handshake round-trip.
      * Kept under the old name so callers don't change.
      */
     suspend fun realTest(context: Context, node: Node): Long =
-        tcpPing(node.host, node.port)
+        mistPing(node.rawLink)
 
     /**
      * Test many nodes with bounded concurrency.
@@ -57,7 +54,7 @@ object LatencyTester {
         nodes.map { node ->
             async {
                 semaphore.withPermit {
-                    val ms = tcpPing(node.host, node.port)
+                    val ms = mistPing(node.rawLink)
                     onResult(node, ms)
                 }
             }
