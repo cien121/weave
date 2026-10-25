@@ -884,7 +884,6 @@ private fun EditSection(title: String) {
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-@Composable
 private fun EditField(
     label: String,
     value: String,

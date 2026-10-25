@@ -13,8 +13,8 @@ android {
         applicationId = "com.chan.weave"
         minSdk = 26
         targetSdk = 34
-        versionCode = 37
-        versionName = "1.0.31"
+        versionCode = 38
+        versionName = "1.0.32"
 
         vectorDrawables {
             useSupportLibrary = true
